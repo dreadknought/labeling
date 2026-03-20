@@ -27,11 +27,20 @@ TEXT PLACEMENT OPTIONS:
   --text-side left   -> draw text block on left side only
   --text-side right  -> draw text block on right side only
   --text-side both   -> split the product list across left and right sides
+
+SORT / ORDERING:
+  - Products are sorted by price ascending
+  - If prices tie, products are sorted alphabetically by strain name
+  - With --text-side both, the sorted list fills the left column first,
+    then the right column
+  - Each column is rendered in reverse order so the first item in that
+    column appears at the bottom and the last item appears at the top
 """
 
 import argparse
 import csv
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -49,12 +58,9 @@ except Exception:
     Image = None  # Pillow is optional unless you enable scaling
 
 
-# 16:9 "screen" in points (and also our target PNG pixels)
 PAGE_WIDTH = 1920
 PAGE_HEIGHT = 1080
 
-
-# ---------------- BASIC HELPERS ---------------- #
 
 def is_inactive(active_raw: str) -> bool:
     s = (active_raw or "").strip().lower()
@@ -62,37 +68,15 @@ def is_inactive(active_raw: str) -> bool:
 
 
 def is_composite_component_row(row: dict) -> bool:
-    """
-    In Lightspeed exports, composite component/recipe lines have composite_sku filled.
-    Those are NOT sellable items and should never be on the sign.
-    """
     return bool((row.get("composite_sku") or "").strip())
 
 
 def is_size_variant_sku(sku: str) -> bool:
-    """
-    Your derived SKUs for other sizes end with:
-      -16 (half eighth)
-      -Q  (quarter)
-      -OZ (ounce)
-    """
     s = (sku or "").strip().upper()
     return s.endswith("-16") or s.endswith("-Q") or s.endswith("-OZ")
 
 
 def parse_tags(tags_raw: str) -> Dict[str, str]:
-    """
-    Parse Lightspeed tags into key=value dict.
-
-    Assumptions:
-      - top-level tags are semicolon-delimited
-      - tag values do not contain semicolons
-      - tag values do not contain extra '=' characters
-
-    Example:
-      'json={"thc":"23.125","netwt":"3.5g"};usecoa=1'
-        -> {"json": '{"thc":"23.125","netwt":"3.5g"}', "usecoa": "1"}
-    """
     out: Dict[str, str] = {}
     if not tags_raw:
         return out
@@ -110,10 +94,6 @@ def parse_tags(tags_raw: str) -> Dict[str, str]:
 
 
 def find_key_recursive(obj: Any, wanted_key: str) -> Optional[str]:
-    """
-    Recursively search nested dict/list structures for a key, case-insensitive.
-    Returns the first scalar value found as a string.
-    """
     wanted_key = wanted_key.lower()
 
     if isinstance(obj, dict):
@@ -138,11 +118,6 @@ def find_key_recursive(obj: Any, wanted_key: str) -> Optional[str]:
 
 
 def extract_tag_value(tags_raw: str, key: str) -> str:
-    """
-    Extract a value from:
-      1) top-level tag key=value
-      2) json=... payload
-    """
     tag_map = parse_tags(tags_raw)
 
     direct = (tag_map.get(key.lower()) or "").strip()
@@ -165,9 +140,6 @@ def extract_tag_value(tags_raw: str, key: str) -> str:
 
 
 def normalize_thc_display(thc_value: str) -> str:
-    """
-    Ensure THC prints as '23.125%' regardless of whether the source includes '%' already.
-    """
     if not thc_value:
         return ""
     s = str(thc_value).strip()
@@ -177,9 +149,6 @@ def normalize_thc_display(thc_value: str) -> str:
 
 
 def normalize_netwt(tag_value: str) -> str:
-    """
-    Normalize net weight like '3.5g' / '3.5 g' -> '3.5g'
-    """
     if not tag_value:
         return ""
     s = str(tag_value).strip().lower().replace(" ", "")
@@ -187,10 +156,6 @@ def normalize_netwt(tag_value: str) -> str:
 
 
 def looks_like_eighth(name: str, product_category: str, netwt: str) -> bool:
-    """
-    Heuristics to treat the item as an eighth.
-    We prefer the tag-based netwt check (your base 1/8 items have netwt=3.5g).
-    """
     n = (name or "").lower()
     cat = (product_category or "").lower()
     nw = normalize_netwt(netwt)
@@ -198,7 +163,6 @@ def looks_like_eighth(name: str, product_category: str, netwt: str) -> bool:
     if nw == "3.5g":
         return True
 
-    # Fallbacks if tags are missing
     if "1/8" in n or "eighth" in n:
         return True
     if "eighth" in cat:
@@ -207,18 +171,7 @@ def looks_like_eighth(name: str, product_category: str, netwt: str) -> bool:
     return False
 
 
-# ---------------- CSV HANDLING ---------------- #
-
 def detect_columns(header: List[str]) -> Tuple[str, Optional[str], str, Optional[str], Optional[str], Optional[str]]:
-    """
-    Auto-detect column names for:
-      - product name
-      - tags
-      - price (retail_price)
-      - active flag (optional)
-      - product category (optional)
-      - legacy THC column (optional)
-    """
     lower_map = {h.lower(): h for h in header}
 
     def find_col(candidates):
@@ -255,32 +208,15 @@ def parse_price(price_raw: str) -> Tuple[str, Optional[float]]:
 
 
 def strip_parentheses(text: str) -> str:
-    """
-    Remove any substrings in parentheses, including the parentheses themselves.
-    Example: "Lemon Cherry Gelato (1) (Test)" -> "Lemon Cherry Gelato"
-    """
     if not text:
         return ""
     s = str(text)
-
-    # Remove " (...) " chunks (including any whitespace right before the '(')
     s = re.sub(r"\s*\([^)]*\)", "", s)
-
-    # Collapse repeated whitespace
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
 def read_products_from_csv(csv_path: Path) -> List[Dict]:
-    """
-    Return a list of product dicts with:
-      { "name", "thc", "price_display", "price_value" }
-
-    EIGHTHS-ONLY RULES:
-      - skip composite component rows (composite_sku filled)
-      - skip size variants (-16/-Q/-OZ)
-      - include only rows that look like an eighth (prefer netwt=3.5g)
-    """
     with csv_path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         header = reader.fieldnames or []
@@ -319,17 +255,14 @@ def read_products_from_csv(csv_path: Path) -> List[Dict]:
         )
 
         products: List[Dict] = []
-        for idx, row in enumerate(reader, start=1):
-            # Active filter
+        for row in reader:
             if active_col and is_inactive(row.get(active_col, "")):
                 continue
 
-            # Skip composite recipe/component rows
             if is_composite_component_row(row):
                 continue
 
             sku = (row.get("sku") or "").strip()
-            # Skip non-eighth sellable variants
             if is_size_variant_sku(sku):
                 continue
 
@@ -340,7 +273,6 @@ def read_products_from_csv(csv_path: Path) -> List[Dict]:
             if not name:
                 continue
 
-            # Pull THC + netwt from tags/json (preferred)
             thc_raw = ""
             netwt_raw = ""
             if tags_col:
@@ -348,16 +280,13 @@ def read_products_from_csv(csv_path: Path) -> List[Dict]:
                 thc_raw = extract_tag_value(tags_raw, "thc")
                 netwt_raw = extract_tag_value(tags_raw, "netwt")
 
-            # Legacy THC fallback
             if not thc_raw and thc_col_legacy:
                 thc_raw = (row.get(thc_col_legacy) or "").strip()
 
-            # Enforce "eighths only"
             if not looks_like_eighth(name=name, product_category=product_category, netwt=netwt_raw):
                 continue
 
             if not thc_raw:
-                # If there's no THC we can't render the THC column properly; skip.
                 continue
 
             price_display, price_value = parse_price(price_raw)
@@ -376,8 +305,6 @@ def read_products_from_csv(csv_path: Path) -> List[Dict]:
 
     return products
 
-
-# ---------------- DRAWING HELPERS ---------------- #
 
 def draw_fitted_text(
     c: canvas.Canvas,
@@ -421,14 +348,9 @@ def get_content_bounds(text_side: str, margin_side: float) -> Tuple[float, float
 
 
 def split_products_for_both_sides(products: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
-    """
-    Split the product list into left and right halves.
-
-    If there are an odd number of products, the left side gets the extra item.
-    """
-    midpoint = (len(products) + 1) // 2
-    left_products = products[:midpoint]
-    right_products = products[midpoint:]
+    midpoint = math.ceil(len(products) / 2.0)
+    left_products = list(reversed(products[:midpoint]))
+    right_products = list(reversed(products[midpoint:]))
     return left_products, right_products
 
 
@@ -497,15 +419,12 @@ def draw_product_block(
             )
 
 
-# ---------------- PAGE DRAWING ---------------- #
-
 def draw_page(
     c: canvas.Canvas,
     products: List[Dict],
     bg_image: Optional[Path],
     text_side: str,
 ):
-    # Background
     if bg_image is not None:
         img = ImageReader(str(bg_image))
         iw, ih = img.getSize()
@@ -519,7 +438,6 @@ def draw_page(
         c.setFillColor(black)
         c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
 
-    # Dark overlay
     c.setFillColor(HexColor("#000000"))
     try:
         c.setFillAlpha(0.35)
@@ -570,16 +488,14 @@ def draw_page(
         )
 
 
-# ---------------- BUILD PDF ---------------- #
-
 def build_signage_pdf(csv_path: Path, out_pdf_path: Path, bg_image: Optional[Path], text_side: str):
     products = read_products_from_csv(csv_path)
 
     def sort_key(p: Dict):
         v = p["price_value"]
         if v is None:
-            return (1, 0.0, p["name"].lower())
-        return (0, -float(v), p["name"].lower())
+            return (1, float("inf"), p["name"].strip().lower())
+        return (0, float(v), p["name"].strip().lower())
 
     products.sort(key=sort_key)
 
@@ -589,8 +505,6 @@ def build_signage_pdf(csv_path: Path, out_pdf_path: Path, bg_image: Optional[Pat
     c.save()
     print(f"Wrote signboard PDF: {out_pdf_path}")
 
-
-# ---------------- PDF -> PNG ---------------- #
 
 def pdf_to_png(pdf_path: Path, out_png_path: Path, dpi: int, scale_to_page: bool):
     out_png_path.parent.mkdir(parents=True, exist_ok=True)
@@ -635,8 +549,6 @@ def pdf_to_png(pdf_path: Path, out_png_path: Path, dpi: int, scale_to_page: bool
     print(f"Wrote signboard PNG: {out_png_path}")
 
 
-# ---------------- OUTPUT PATH HELPERS ---------------- #
-
 def derive_outputs(out_arg: str) -> Tuple[Path, Path]:
     p = Path(out_arg)
     s = p.suffix.lower()
@@ -649,8 +561,6 @@ def derive_outputs(out_arg: str) -> Tuple[Path, Path]:
     return Path(str(p) + ".pdf"), Path(str(p) + ".png")
 
 
-# ---------------- CLI ---------------- #
-
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -662,11 +572,8 @@ def main():
     parser.add_argument("--out", default="signboard.pdf")
     parser.add_argument("--format", choices=["pdf", "png", "both"], default="pdf")
     parser.add_argument("--bg-image", help="Optional background image (PNG/JPG).")
-
-    # Support both flags so your current command keeps working
     parser.add_argument("--text-side", choices=["left", "right", "both"], default="left")
     parser.add_argument("--text", choices=["left", "right", "both"], dest="text_side", help="Alias for --text-side")
-
     parser.add_argument("--png-dpi", type=int, default=144)
     parser.add_argument("--no-png-scale-to-page", action="store_true")
 
@@ -684,7 +591,6 @@ def main():
         bg_image = p
 
     out_pdf_path, out_png_path = derive_outputs(args.out)
-
     text_side = args.text_side
 
     if args.format in ("pdf", "both"):
