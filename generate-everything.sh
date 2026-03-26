@@ -61,14 +61,24 @@ mkdir -p \
 start_job "signboard left" bash -lc "
   cd '$SCRIPT_DIR/signboards' &&
   ./signage_from_csv.py --bg-image left-tv.jpg '$SKUS' --text both --format png \
-    --out '$OUTPUT_DIR/signboards/left.png'
+    --out '$OUTPUT_DIR/signboards/left.png' &&
+    cd '$OUTPUT_DIR/signboards' && 
+    cp left.png left2.png &&
+    cp left.png left3.png && 
+    cp left.png left4.png &&
+    cp left.png left5.png
 "
 
 start_job "signboard right" bash -lc "
   cd '$SCRIPT_DIR/signboards' &&
   ./signage_from_csv.py --bg-image right-tv.jpg '$SKUS' --text both --format png \
-    --out '$OUTPUT_DIR/signboards/right.png'
+    --out '$OUTPUT_DIR/signboards/right.png' &&
+    cd '$OUTPUT_DIR/signboards' &&
+    cp right.png right2.png &&
+    cp right.png right3.png &&
+    cp right.png right4.png
 "
+
 
 start_job "circle lids" bash -lc "
   cd '$SCRIPT_DIR/lids' &&
