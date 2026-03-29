@@ -8,6 +8,7 @@ echo "script dir: $SCRIPT_DIR"
 OUTPUT_DIR=/tmp/script_output
 LABEL_HEIGHT=0.75
 SKUS="$SCRIPT_DIR/skus/skus.csv"
+BARCODE_SCRIPT="$SCRIPT_DIR/barcodes/generate_code128_labels.py"
 
 run_job() {
   local name="$1"
@@ -60,25 +61,36 @@ mkdir -p \
 
 start_job "signboard left" bash -lc "
   cd '$SCRIPT_DIR/signboards' &&
-  ./signage_from_csv.py --bg-image left-tv.jpg '$SKUS' --text both --format png \
+  ./signage_from_csv.py \
+    --bg-image left-tv.jpg \
+    '$SKUS' \
+    --text both \
+    --format png \
+    --page-height 900 \
+    --vertical-offset 40 \
     --out '$OUTPUT_DIR/signboards/left.png' &&
-    cd '$OUTPUT_DIR/signboards' && 
-    cp left.png left2.png &&
-    cp left.png left3.png && 
-    cp left.png left4.png &&
-    cp left.png left5.png
+  cd '$OUTPUT_DIR/signboards' &&
+  cp left.png left2.png &&
+  cp left.png left3.png &&
+  cp left.png left4.png &&
+  cp left.png left5.png
 "
 
 start_job "signboard right" bash -lc "
   cd '$SCRIPT_DIR/signboards' &&
-  ./signage_from_csv.py --bg-image right-tv.jpg '$SKUS' --text both --format png \
+  ./signage_from_csv.py \
+    --bg-image right-tv.jpg \
+    '$SKUS' \
+    --text both \
+    --format png \
+    --page-height 900 \
+    --vertical-offset 40 \
     --out '$OUTPUT_DIR/signboards/right.png' &&
-    cd '$OUTPUT_DIR/signboards' &&
-    cp right.png right2.png &&
-    cp right.png right3.png &&
-    cp right.png right4.png
+  cd '$OUTPUT_DIR/signboards' &&
+  cp right.png right2.png &&
+  cp right.png right3.png &&
+  cp right.png right4.png
 "
-
 
 start_job "circle lids" bash -lc "
   cd '$SCRIPT_DIR/lids' &&
@@ -106,29 +118,29 @@ start_job "mason jar signboard pdf+png" bash -lc "
 "
 
 start_job "barcode normal" bash -lc "
-  cd '$SCRIPT_DIR/barcodes/flower-barcodes' &&
-  ./barcode.py '$SKUS' \
-    --barcodes-dir ./barcode-images/ \
+  python3 '$BARCODE_SCRIPT' '$SKUS' \
+    --category-prefix Flower \
+    --sku-regex 'FL[A-Z]+[EQ]' \
     --out-dir '$OUTPUT_DIR/barcodes/'
 "
 
 start_job "barcode short" bash -lc "
-  cd '$SCRIPT_DIR/barcodes/flower-barcodes' &&
-  ./barcode.py '$SKUS' \
-    --barcodes-dir ./barcode-images/ \
+  python3 '$BARCODE_SCRIPT' '$SKUS' \
+    --category-prefix Flower \
+    --sku-regex 'FL[A-Z]+[EQ]' \
     --out-dir '$OUTPUT_DIR/barcodes-short/' \
-    --label-height $LABEL_HEIGHT \
-    --no-bounding-rect
+    --label-height $LABEL_HEIGHT
 "
 
 start_job "barcode packed page" bash -lc "
-  cd '$SCRIPT_DIR/barcodes/flower-barcodes' &&
-  ./barcode.py '$SKUS' \
-    --barcodes-dir ./barcode-images \
+  python3 '$BARCODE_SCRIPT' '$SKUS' \
+    --category-prefix Flower \
+    --sku-regex 'FL[A-Z]+[EQ]' \
     --sheet-mode \
+    --pair-flower-sheet \
     --out-pdf '$OUTPUT_DIR/barcodes-page/barcodes_page.pdf' \
     --label-height $LABEL_HEIGHT \
-    --no-bounding-rect \
+    --sheet-outline-mode guide \
     --margin-left 0.25 \
     --margin-right 0.25 \
     --margin-top 0.25 \
@@ -136,13 +148,13 @@ start_job "barcode packed page" bash -lc "
 "
 
 start_job "barcode edibles" bash -lc "
-  cd '$SCRIPT_DIR/barcodes/edibles-barcodes' &&
-  python3 ./barcode_label_maker.py \
-    --input-dir ./barcode-images \
-    --csv '$SKUS' \
-    --output-dir '$OUTPUT_DIR/barcodes/edibles' \
-    --height-in 0.5 \
-    --format pdf
+  python3 '$BARCODE_SCRIPT' '$SKUS' \
+    --category-prefix Edibles \
+    --sku-regex '[0-9]+' \
+    --out-dir '$OUTPUT_DIR/barcodes/edibles' \
+    --label-height 0.5 \
+    --individual-outline-mode cutcontour \
+    --outline-shape round
 "
 
 wait_for_jobs
