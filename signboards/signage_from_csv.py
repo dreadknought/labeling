@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # path: signage_from_csv.py
 """
-Generate a 16:9 signboard from a Lightspeed-export CSV as:
+Generate a signboard from a Lightspeed-export CSV as:
   - PDF
   - PNG
   - BOTH (PDF + PNG)
@@ -35,6 +35,11 @@ SORT / ORDERING:
     then the right column
   - Each column is rendered in reverse order so the first item in that
     column appears at the bottom and the last item appears at the top
+
+DISPLAY-SIZING OPTIONS:
+  - Default output is still 1920x1080
+  - You can reduce the output height with --page-height for browser-based display
+  - You can nudge the text block vertically with --vertical-offset
 """
 
 import argparse
@@ -59,7 +64,7 @@ except Exception:
 
 
 PAGE_WIDTH = 1920
-PAGE_HEIGHT = 1080
+DEFAULT_PAGE_HEIGHT = 1080
 
 
 def is_inactive(active_raw: str) -> bool:
@@ -361,6 +366,8 @@ def draw_product_block(
     content_right: float,
     margin_top: float,
     margin_bottom: float,
+    page_height: float,
+    vertical_offset: float = 0.0,
 ):
     if not products:
         return
@@ -372,11 +379,11 @@ def draw_product_block(
     price_x = content_left + content_width * 0.85
 
     n = len(products)
-    available_height = PAGE_HEIGHT - margin_top - margin_bottom
+    available_height = page_height - margin_top - margin_bottom
     row_height = min(available_height / n, 70)
 
     block_height = row_height * n
-    block_bottom = (PAGE_HEIGHT - block_height) / 2.0
+    block_bottom = ((page_height - block_height) / 2.0) + vertical_offset
 
     for i, p in enumerate(products):
         row_center_y = block_bottom + (i + 0.5) * row_height
@@ -424,26 +431,28 @@ def draw_page(
     products: List[Dict],
     bg_image: Optional[Path],
     text_side: str,
+    page_height: float,
+    vertical_offset: float = 0.0,
 ):
     if bg_image is not None:
         img = ImageReader(str(bg_image))
         iw, ih = img.getSize()
-        scale = max(PAGE_WIDTH / iw, PAGE_HEIGHT / ih)
+        scale = max(PAGE_WIDTH / iw, page_height / ih)
         draw_w = iw * scale
         draw_h = ih * scale
         x = (PAGE_WIDTH - draw_w) / 2.0
-        y = (PAGE_HEIGHT - draw_h) / 2.0
+        y = (page_height - draw_h) / 2.0
         c.drawImage(img, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
     else:
         c.setFillColor(black)
-        c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
+        c.rect(0, 0, PAGE_WIDTH, page_height, fill=1, stroke=0)
 
     c.setFillColor(HexColor("#000000"))
     try:
         c.setFillAlpha(0.35)
     except AttributeError:
         pass
-    c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
+    c.rect(0, 0, PAGE_WIDTH, page_height, fill=1, stroke=0)
     try:
         c.setFillAlpha(1.0)
     except AttributeError:
@@ -466,6 +475,8 @@ def draw_page(
             content_right=left_content_right,
             margin_top=margin_top,
             margin_bottom=margin_bottom,
+            page_height=page_height,
+            vertical_offset=vertical_offset,
         )
 
         draw_product_block(
@@ -475,6 +486,8 @@ def draw_page(
             content_right=right_content_right,
             margin_top=margin_top,
             margin_bottom=margin_bottom,
+            page_height=page_height,
+            vertical_offset=vertical_offset,
         )
     else:
         content_left, content_right = get_content_bounds(text_side, margin_side)
@@ -485,10 +498,19 @@ def draw_page(
             content_right=content_right,
             margin_top=margin_top,
             margin_bottom=margin_bottom,
+            page_height=page_height,
+            vertical_offset=vertical_offset,
         )
 
 
-def build_signage_pdf(csv_path: Path, out_pdf_path: Path, bg_image: Optional[Path], text_side: str):
+def build_signage_pdf(
+    csv_path: Path,
+    out_pdf_path: Path,
+    bg_image: Optional[Path],
+    text_side: str,
+    page_height: int,
+    vertical_offset: float = 0.0,
+):
     products = read_products_from_csv(csv_path)
 
     def sort_key(p: Dict):
@@ -499,14 +521,21 @@ def build_signage_pdf(csv_path: Path, out_pdf_path: Path, bg_image: Optional[Pat
 
     products.sort(key=sort_key)
 
-    c = canvas.Canvas(str(out_pdf_path), pagesize=(PAGE_WIDTH, PAGE_HEIGHT))
-    draw_page(c, products=products, bg_image=bg_image, text_side=text_side)
+    c = canvas.Canvas(str(out_pdf_path), pagesize=(PAGE_WIDTH, page_height))
+    draw_page(
+        c,
+        products=products,
+        bg_image=bg_image,
+        text_side=text_side,
+        page_height=page_height,
+        vertical_offset=vertical_offset,
+    )
     c.showPage()
     c.save()
     print(f"Wrote signboard PDF: {out_pdf_path}")
 
 
-def pdf_to_png(pdf_path: Path, out_png_path: Path, dpi: int, scale_to_page: bool):
+def pdf_to_png(pdf_path: Path, out_png_path: Path, dpi: int, scale_to_page: bool, page_height: int):
     out_png_path.parent.mkdir(parents=True, exist_ok=True)
 
     pdftoppm = shutil.which("pdftoppm")
@@ -541,7 +570,7 @@ def pdf_to_png(pdf_path: Path, out_png_path: Path, dpi: int, scale_to_page: bool
                     "Install: pip install pillow  (or: sudo apt install python3-pil)\n"
                 )
             im = Image.open(rendered).convert("RGBA")
-            im = im.resize((PAGE_WIDTH, PAGE_HEIGHT), resample=Image.LANCZOS)
+            im = im.resize((PAGE_WIDTH, page_height), resample=Image.LANCZOS)
             im.save(out_png_path)
         else:
             out_png_path.write_bytes(rendered.read_bytes())
@@ -564,7 +593,7 @@ def derive_outputs(out_arg: str) -> Tuple[Path, Path]:
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a 16:9 signboard from a Lightspeed CSV.\n"
+            "Generate a signboard from a Lightspeed CSV.\n"
             "This script is configured for EIGHTHS ONLY (excludes -16/-Q/-OZ and composite component rows).\n"
         )
     )
@@ -576,6 +605,8 @@ def main():
     parser.add_argument("--text", choices=["left", "right", "both"], dest="text_side", help="Alias for --text-side")
     parser.add_argument("--png-dpi", type=int, default=144)
     parser.add_argument("--no-png-scale-to-page", action="store_true")
+    parser.add_argument("--page-height", type=int, default=DEFAULT_PAGE_HEIGHT)
+    parser.add_argument("--vertical-offset", type=float, default=0.0)
 
     args = parser.parse_args()
 
@@ -592,18 +623,46 @@ def main():
 
     out_pdf_path, out_png_path = derive_outputs(args.out)
     text_side = args.text_side
+    page_height = args.page_height
+    vertical_offset = args.vertical_offset
 
     if args.format in ("pdf", "both"):
-        build_signage_pdf(csv_path, out_pdf_path, bg_image, text_side)
+        build_signage_pdf(
+            csv_path,
+            out_pdf_path,
+            bg_image,
+            text_side,
+            page_height=page_height,
+            vertical_offset=vertical_offset,
+        )
 
     if args.format in ("png", "both"):
         if args.format == "png":
             with tempfile.TemporaryDirectory() as td:
                 tmp_pdf = Path(td) / "signboard.pdf"
-                build_signage_pdf(csv_path, tmp_pdf, bg_image, text_side)
-                pdf_to_png(tmp_pdf, out_png_path, args.png_dpi, (not args.no_png_scale_to_page))
+                build_signage_pdf(
+                    csv_path,
+                    tmp_pdf,
+                    bg_image,
+                    text_side,
+                    page_height=page_height,
+                    vertical_offset=vertical_offset,
+                )
+                pdf_to_png(
+                    tmp_pdf,
+                    out_png_path,
+                    args.png_dpi,
+                    (not args.no_png_scale_to_page),
+                    page_height=page_height,
+                )
         else:
-            pdf_to_png(out_pdf_path, out_png_path, args.png_dpi, (not args.no_png_scale_to_page))
+            pdf_to_png(
+                out_pdf_path,
+                out_png_path,
+                args.png_dpi,
+                (not args.no_png_scale_to_page),
+                page_height=page_height,
+            )
 
 
 if __name__ == "__main__":
