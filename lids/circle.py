@@ -69,6 +69,37 @@ def normalize_thc_value(thc_raw: str) -> str:
     return s
 
 
+
+
+def extract_indexed_thc_values(tags_raw: str) -> List[Tuple[int, str]]:
+    """
+    Return all coa_ref_N_thc values, ordered by index.
+
+    The index is included so output filenames can point back to the exact
+    COA/THC pair in the flat tag array.
+    """
+    tag_map = parse_tags(tags_raw)
+    out: List[Tuple[int, str]] = []
+
+    for key, value in tag_map.items():
+        match = re.fullmatch(r"coa_ref_(\d+)_thc", key)
+        if not match:
+            continue
+
+        thc = normalize_thc_value(value)
+        if thc:
+            out.append((int(match.group(1)), thc))
+
+    return sorted(out, key=lambda item: item[0])
+
+
+def highest_indexed_thc_value(tags_raw: str) -> str:
+    indexed = extract_indexed_thc_values(tags_raw)
+    if not indexed:
+        return ""
+    return indexed[-1][1]
+
+
 def find_key_recursive(obj: Any, wanted_key: str) -> Optional[str]:
     """
     Recursively search nested dict/list structures for a key, case-insensitive.
@@ -99,11 +130,16 @@ def find_key_recursive(obj: Any, wanted_key: str) -> Optional[str]:
 
 def extract_thc_value(tags_raw: str, legacy_thc_raw: str = "") -> str:
     """
-    THC extraction order:
-    1. top-level thc=...
-    2. embedded json=... payload
-    3. legacy THC column fallback
+    THC extraction order for a single-value consumer:
+    1. highest indexed coa_ref_N_thc=...
+    2. top-level thc=...
+    3. embedded json=... payload
+    4. legacy THC column fallback
     """
+    indexed_thc = highest_indexed_thc_value(tags_raw)
+    if indexed_thc:
+        return indexed_thc
+
     tag_map = parse_tags(tags_raw)
 
     thc_raw = (tag_map.get("thc") or "").strip()
@@ -153,6 +189,19 @@ def is_composite_component_row(row: dict) -> bool:
     Those are not real sellable items and should not generate labels.
     """
     return bool((row.get("composite_sku") or "").strip())
+
+
+def regex_matches(value: str, pattern: Optional[str]) -> bool:
+    if not pattern:
+        return False
+    return bool(re.fullmatch(pattern, (value or "").strip()))
+
+
+def category_matches_prefix(value: str, prefixes: List[str]) -> bool:
+    if not prefixes:
+        return True
+    folded = (value or "").strip().lower()
+    return any(folded.startswith(prefix.strip().lower()) for prefix in prefixes if prefix.strip())
 
 
 # ---------------- HELPERS ---------------- #
@@ -518,7 +567,7 @@ def make_label_pdf(
 
 # ---------------- CSV COLUMN DETECTION ---------------- #
 
-def detect_columns(header) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
+def detect_columns(header) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Weight is intentionally not detected/read from CSV/tags.
     Net weight is only printed when --weight is provided.
@@ -535,8 +584,10 @@ def detect_columns(header) -> Tuple[str, Optional[str], Optional[str], Optional[
     tags_col = find_col(["tags", "tag", "product tags", "product_tags"])
     thc_col = find_col(["thc", "total thc", "thc content", "thc_content"])
     active_col = find_col(["active", "is active", "is_active", "enabled"])
+    sku_col = find_col(["sku"])
+    product_category_col = find_col(["product_category", "product category", "category"])
 
-    return name_col, tags_col, thc_col, active_col
+    return name_col, tags_col, thc_col, active_col, sku_col, product_category_col
 
 
 def strip_parentheses(text: str) -> str:
@@ -548,18 +599,44 @@ def strip_parentheses(text: str) -> str:
     return s
 
 
+def extract_lid_thc_records(tags_raw: str, legacy_thc_raw: str = "") -> List[Tuple[Optional[int], str]]:
+    """Return every THC value that should get a lid.
+
+    Prefer indexed coa_ref_N_thc values. Fallbacks keep older CSVs usable.
+    """
+    indexed = extract_indexed_thc_values(tags_raw)
+    if indexed:
+        return [(idx, thc) for idx, thc in indexed]
+
+    fallback = extract_thc_value(tags_raw, legacy_thc_raw)
+    if fallback:
+        return [(None, fallback)]
+
+    return []
+
+
+def thc_filename_fragment(index: Optional[int], thc: str) -> str:
+    safe_thc = slugify(normalize_thc_value(thc).replace(".", "-"))
+    if index is None:
+        return f"legacy-thc-{safe_thc}"
+    return f"{index}-thc-{safe_thc}"
+
+
 def process_csv(
     csv_path: Path,
     out_dir: Path,
     bg_image: Optional[Path],
     diameters_inch: List[float],
     weight_override: Optional[str],
+    sku_regex: Optional[str],
+    exclude_sku_regex: Optional[str],
+    category_prefixes: List[str],
 ):
     with csv_path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         header = reader.fieldnames or []
 
-        name_col, tags_col, thc_col, active_col = detect_columns(header)
+        name_col, tags_col, thc_col, active_col, sku_col, product_category_col = detect_columns(header)
 
         if not name_col:
             raise SystemExit(
@@ -581,14 +658,17 @@ def process_csv(
             f"Using columns -> name: {name_col}, "
             f"tags: {tags_col or '(none)'}, "
             f"thc_legacy: {thc_col or '(none)'}, "
-            f"active: {active_col or '(none; all treated active)'}"
+            f"active: {active_col or '(none; all treated active)'}, "
+            f"sku: {sku_col or '(none)'}, "
+            f"product_category: {product_category_col or '(none)'}"
         )
 
         normalized_override = None
         if weight_override is not None:
             normalized_override = normalize_weight_grams(weight_override.strip()) or None
 
-        labels: list[tuple[str, str, Optional[str]]] = []
+        labels: list[tuple[str, Optional[int], str, Optional[str]]] = []
+        seen_labels: set[tuple[str, Optional[int], str, Optional[str]]] = set()
 
         for row in reader:
             if is_composite_component_row(row):
@@ -597,25 +677,42 @@ def process_csv(
             if active_col and is_inactive(row.get(active_col, "")):
                 continue
 
+            sku = (row.get(sku_col, "") if sku_col else "").strip()
+            product_category = (row.get(product_category_col, "") if product_category_col else "").strip()
+
+            if sku_regex and not regex_matches(sku, sku_regex):
+                continue
+
+            if exclude_sku_regex and regex_matches(sku, exclude_sku_regex):
+                continue
+
+            if not category_matches_prefix(product_category, category_prefixes):
+                continue
+
             name = strip_parentheses((row.get(name_col) or "").strip())
             if not name:
                 continue
 
             tags_raw = row.get(tags_col, "") if tags_col else ""
             legacy_thc_raw = row.get(thc_col, "") if thc_col else ""
-            thc = extract_thc_value(tags_raw, legacy_thc_raw)
+            thc_records = extract_lid_thc_records(tags_raw, legacy_thc_raw)
 
-            if not thc:
+            if not thc_records:
                 continue
 
             weight: Optional[str] = normalized_override
-            labels.append((name, thc, weight))
+            for coa_index, thc in thc_records:
+                label = (name, coa_index, thc, weight)
+                if label in seen_labels:
+                    continue
+                seen_labels.add(label)
+                labels.append(label)
 
         if not labels:
             print("No valid labels found in CSV.")
             return
 
-        for (name, thc, weight) in labels:
+        for (name, coa_index, thc, weight) in labels:
             strain_slug = slugify(name)
             strain_dir = out_dir / strain_slug
             strain_dir.mkdir(parents=True, exist_ok=True)
@@ -623,10 +720,11 @@ def process_csv(
             for diameter_inch in diameters_inch:
                 size_tag = format_size_tag(diameter_inch)
 
+                prefix = thc_filename_fragment(coa_index, thc)
                 if weight:
-                    filename = f"{slugify(name)}-{weight}g-{size_tag}.pdf"
+                    filename = f"{prefix}-{slugify(name)}-{weight}g-{size_tag}.pdf"
                 else:
-                    filename = f"{slugify(name)}-{size_tag}.pdf"
+                    filename = f"{prefix}-{slugify(name)}-{size_tag}.pdf"
 
                 outfile = strain_dir / filename
 
@@ -678,6 +776,20 @@ def main():
             "If omitted, no net weight is printed."
         ),
     )
+    parser.add_argument(
+        "--sku-regex",
+        help="Only generate lids for rows whose SKU fully matches this regex.",
+    )
+    parser.add_argument(
+        "--exclude-sku-regex",
+        help="Skip rows whose SKU fully matches this regex.",
+    )
+    parser.add_argument(
+        "--category-prefix",
+        action="append",
+        default=[],
+        help="Only generate lids for rows whose product_category starts with this value. Repeatable.",
+    )
 
     args = parser.parse_args()
 
@@ -702,6 +814,9 @@ def main():
         bg_image=bg_image,
         diameters_inch=diameters_inch,
         weight_override=args.weight,
+        sku_regex=args.sku_regex,
+        exclude_sku_regex=args.exclude_sku_regex,
+        category_prefixes=args.category_prefix,
     )
 
 

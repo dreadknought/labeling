@@ -119,6 +119,28 @@ def normalize_thc_value(thc_raw: str) -> str:
     return s
 
 
+
+
+def highest_indexed_thc_value(tags_raw: str) -> str:
+    tag_map = parse_tags(tags_raw)
+    best: tuple[int, str] | None = None
+
+    for key, value in tag_map.items():
+        match = re.fullmatch(r"coa_ref_(\d+)_thc", key)
+        if not match:
+            continue
+
+        thc = normalize_thc_value(value)
+        if not thc:
+            continue
+
+        idx = int(match.group(1))
+        if best is None or idx > best[0]:
+            best = (idx, thc)
+
+    return best[1] if best else ""
+
+
 def find_key_recursive(obj: Any, wanted_key: str) -> Optional[str]:
     wanted_key = wanted_key.lower()
 
@@ -147,6 +169,10 @@ def extract_thc_value(tags_raw: str, legacy_thc_raw: str = "") -> str:
     Fall back to legacy JSON-in-tags if it exists.
     Fall back again to the explicit THC CSV column if present.
     """
+    indexed_thc = highest_indexed_thc_value(tags_raw)
+    if indexed_thc:
+        return indexed_thc
+
     tag_map = parse_tags(tags_raw)
     thc_raw = (tag_map.get("thc") or "").strip()
     if thc_raw:

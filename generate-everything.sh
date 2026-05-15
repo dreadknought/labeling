@@ -52,11 +52,16 @@ wait_for_jobs() {
 mkdir -p \
   "$OUTPUT_DIR/signboards" \
   "$OUTPUT_DIR/lids" \
+  "$OUTPUT_DIR/lids/bbuds" \
   "$OUTPUT_DIR/lids/jars" \
+  "$OUTPUT_DIR/lids/jars/bbuds" \
   "$OUTPUT_DIR/barcodes" \
+  "$OUTPUT_DIR/barcodes/bbuds" \
   "$OUTPUT_DIR/barcodes/edibles" \
   "$OUTPUT_DIR/barcodes-short" \
+  "$OUTPUT_DIR/barcodes-short/bbuds" \
   "$OUTPUT_DIR/barcodes-page" \
+  "$OUTPUT_DIR/barcodes-page/bbuds" \
   "$OUTPUT_DIR/grid_signboard"
 
 start_job "signboard left" bash -lc "
@@ -98,6 +103,17 @@ start_job "circle lids" bash -lc "
     --out-dir '$OUTPUT_DIR/lids' \
     --diameters 1.25 1.5 \
     --bg-image hemp-dahntahn.png \
+    --exclude-sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)' \
+    '$SKUS'
+"
+
+start_job "circle lids bbuds" bash -lc "
+  cd '$SCRIPT_DIR/lids' &&
+  ./circle.py \
+    --out-dir '$OUTPUT_DIR/lids/bbuds' \
+    --diameters 1.25 1.5 \
+    --bg-image hemp-dahntahn.png \
+    --sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)' \
     '$SKUS'
 "
 
@@ -107,6 +123,17 @@ start_job "circle jars" bash -lc "
     --out-dir '$OUTPUT_DIR/lids/jars' \
     --diameters 2.15 \
     --bg-image jar.png \
+    --exclude-sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)' \
+    '$SKUS'
+"
+
+start_job "circle jars bbuds" bash -lc "
+  cd '$SCRIPT_DIR/lids' &&
+  ./circle.py \
+    --out-dir '$OUTPUT_DIR/lids/jars/bbuds' \
+    --diameters 2.15 \
+    --bg-image jar.png \
+    --sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)' \
     '$SKUS'
 "
 
@@ -124,6 +151,12 @@ start_job "barcode normal" bash -lc "
     --out-dir '$OUTPUT_DIR/barcodes/'
 "
 
+start_job "barcode bbuds" bash -lc "
+  python3 '$BARCODE_SCRIPT' '$SKUS' \
+    --sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)' \
+    --out-dir '$OUTPUT_DIR/barcodes/bbuds/'
+"
+
 start_job "barcode short" bash -lc "
   python3 '$BARCODE_SCRIPT' '$SKUS' \
     --category-prefix Flower \
@@ -132,13 +165,33 @@ start_job "barcode short" bash -lc "
     --label-height $LABEL_HEIGHT
 "
 
+start_job "barcode short bbuds" bash -lc "
+  python3 '$BARCODE_SCRIPT' '$SKUS' \
+    --sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)' \
+    --out-dir '$OUTPUT_DIR/barcodes-short/bbuds/' \
+    --label-height $LABEL_HEIGHT
+"
+
 start_job "barcode packed page" bash -lc "
   python3 '$BARCODE_SCRIPT' '$SKUS' \
     --category-prefix Flower \
-    --sku-regex 'FL[A-Z]+[EQ]' \
+    --sku-regex 'FL[A-Z]+[EQ]|BB-[A-Z]+-HO' \
     --sheet-mode \
     --pair-flower-sheet \
     --out-pdf '$OUTPUT_DIR/barcodes-page/barcodes_page.pdf' \
+    --label-height $LABEL_HEIGHT \
+    --sheet-outline-mode guide \
+    --margin-left 0.25 \
+    --margin-right 0.25 \
+    --margin-top 0.25 \
+    --margin-bottom 0.25
+"
+
+start_job "barcode packed page bbuds" bash -lc "
+  python3 '$BARCODE_SCRIPT' '$SKUS' \
+    --sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)' \
+    --sheet-mode \
+    --out-pdf '$OUTPUT_DIR/barcodes-page/bbuds/barcodes_page.pdf' \
     --label-height $LABEL_HEIGHT \
     --sheet-outline-mode guide \
     --margin-left 0.25 \
