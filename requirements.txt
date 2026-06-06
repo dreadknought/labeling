@@ -1,0 +1,5 @@
+Pillow
+PyPDF2
+pandas
+pypdf
+reportlab
