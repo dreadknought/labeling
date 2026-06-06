@@ -5,7 +5,7 @@ set -x
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 echo "script dir: $SCRIPT_DIR"
 
-OUTPUT_DIR=/tmp/script_output
+OUTPUT_DIR="/media/ibuckman/SSK SSD/pictures/labels"
 LABEL_HEIGHT=0.75
 SKUS="$SCRIPT_DIR/skus/skus.csv"
 BARCODE_SCRIPT="$SCRIPT_DIR/barcodes/generate_code128_labels.py"
