@@ -122,6 +122,36 @@ def find_key_recursive(obj: Any, wanted_key: str) -> Optional[str]:
     return None
 
 
+
+
+def extract_last_flattened_array_tag_value(tags_raw: str, array_name: str, key: str) -> str:
+    """
+    Read tags stored like a flattened array:
+      coa_ref_0_thc=31.89;coa_ref_1_thc=29.36
+
+    Returns the value for the highest numeric index. This lets the most recently
+    appended COA win when a product has multiple COA refs.
+    """
+    tag_map = parse_tags(tags_raw)
+    pattern = re.compile(
+        rf"^{re.escape(array_name.lower())}_(\d+)_{re.escape(key.lower())}$"
+    )
+
+    matches = []
+    for tag_key, tag_value in tag_map.items():
+        m = pattern.match(tag_key)
+        if not m:
+            continue
+        value = (tag_value or "").strip()
+        if value:
+            matches.append((int(m.group(1)), value))
+
+    if not matches:
+        return ""
+
+    matches.sort(key=lambda item: item[0])
+    return matches[-1][1]
+
 def extract_tag_value(tags_raw: str, key: str) -> str:
     tag_map = parse_tags(tags_raw)
 
@@ -283,6 +313,8 @@ def read_products_from_csv(csv_path: Path) -> List[Dict]:
             if tags_col:
                 tags_raw = (row.get(tags_col) or "").strip()
                 thc_raw = extract_tag_value(tags_raw, "thc")
+                if not thc_raw:
+                    thc_raw = extract_last_flattened_array_tag_value(tags_raw, "coa_ref", "thc")
                 netwt_raw = extract_tag_value(tags_raw, "netwt")
 
             if not thc_raw and thc_col_legacy:
