@@ -654,7 +654,9 @@ def pair_flower_records(records: list[dict[str, str]]) -> list[dict[str, Any]]:
         grouped.setdefault(stem, {})[suffix] = rec
 
     paired: list[dict[str, Any]] = []
-    for stem in sorted(grouped):
+    # Preserve incoming record order. This lets --sort-by-name actually control
+    # packed sheet order after E/Q flower records are paired.
+    for stem in grouped:
         bucket = grouped[stem]
         if "single" in bucket:
             paired.append({"top": bucket["single"], "bottom": None})
