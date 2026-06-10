@@ -178,6 +178,7 @@ start_job "barcode packed page" bash -lc "
     --sku-regex 'FL[A-Z]+[EQ]|BB-[A-Z]+-HO' \
     --sheet-mode \
     --pair-flower-sheet \
+    --sort-by-name \
     --out-pdf '$OUTPUT_DIR/barcodes-page/barcodes_page.pdf' \
     --label-height $LABEL_HEIGHT \
     --sheet-outline-mode guide \
