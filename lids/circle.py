@@ -282,6 +282,106 @@ def strip_parentheses(text: str) -> str:
     return clean_product_name_for_lid(text)
 
 
+def is_base_product_name(name: str) -> bool:
+    return bool(
+        re.match(
+            r"^\s*BASE\s*[^A-Za-z0-9]+\s*BASE\s*[^A-Za-z0-9]+",
+            name or "",
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def sku_candidate_score(
+    sku: str,
+    raw_name: str,
+    handle: str,
+    tags_raw: str,
+    product_category: str,
+    active_raw: str,
+) -> int:
+    """
+    Higher score wins when multiple rows provide an E or Q SKU for the same strain.
+
+    Important rule:
+    - Sellable flower SKUs do not have dashes.
+    - Base inventory SKUs generally do have dashes, like FL-INTE.
+
+    So a no-dash SKU should beat a dashed SKU for the same strain/size.
+    """
+    score = 0
+    tags = parse_tags(tags_raw)
+    handle_l = (handle or "").strip().lower()
+    category_l = (product_category or "").strip().lower()
+    sku_s = (sku or "").strip()
+
+    if is_inactive(active_raw):
+        score -= 1000
+    else:
+        score += 20
+
+    # This is now the strongest signal.
+    # FLINTERSE beats FL-INTE.
+    # FLINTERSQ beats FL-INTQ or any dashed quarter/base SKU.
+    if "-" not in sku_s:
+        score += 1000
+    else:
+        score -= 500
+
+    if is_base_product_name(raw_name) or handle_l.startswith("base-"):
+        score -= 500
+    else:
+        score += 100
+
+    if tags.get("sellable_composite", "").strip().lower() in {"1", "true", "yes", "y"}:
+        score += 300
+
+    if category_l.startswith("flower / eighth") and not is_base_product_name(raw_name):
+        score += 50
+
+    if category_l.startswith("flower / quarter") and not is_base_product_name(raw_name):
+        score += 50
+
+    if sku_s:
+        score += 1
+
+    return score
+
+
+def remember_best_sku(
+    skus_by_strain: dict,
+    strain_key: str,
+    sku_suffix: str,
+    sku: str,
+    raw_name: str,
+    handle: str,
+    tags_raw: str,
+    product_category: str,
+    active_raw: str,
+) -> None:
+    if not sku:
+        return
+
+    score = sku_candidate_score(
+        sku=sku,
+        raw_name=raw_name,
+        handle=handle,
+        tags_raw=tags_raw,
+        product_category=product_category,
+        active_raw=active_raw,
+    )
+
+    skus_by_strain.setdefault(strain_key, {})
+
+    existing = skus_by_strain[strain_key].get(sku_suffix)
+    if existing is None or score > existing["score"]:
+        skus_by_strain[strain_key][sku_suffix] = {
+            "sku": sku,
+            "score": score,
+            "raw_name": raw_name,
+        }
+
+
 def patch_cutcontour(pdf_path: Path) -> None:
     reader = PdfReader(str(pdf_path))
     writer = PdfWriter()
@@ -469,8 +569,6 @@ def draw_machine_readable_label(
     thc_band_width = inner_radius * 1.05
 
     if code_style == "barcode":
-        # Keep the barcode wide, but make it a bit shorter vertically
-        # so it fits between the name and percentage better.
         barcode_height = inner_radius * 0.88
         barcode_width = inner_radius * 1.82
 
@@ -484,8 +582,6 @@ def draw_machine_readable_label(
 
         draw_code128(c, code_value, code_x, code_y, barcode_width, barcode_height)
 
-        # Keep text positions based on the overall circle, not barcode height,
-        # so shortening the barcode actually opens more space between them.
         name_y_center = center_y + inner_radius * 0.40
         thc_y_center = center_y - inner_radius * 0.40
 
@@ -784,7 +880,7 @@ def make_label_pdf(
 
 # ---------------- CSV COLUMN DETECTION ---------------- #
 
-def detect_columns(header) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+def detect_columns(header) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
     lower_map = {h.lower(): h for h in header}
 
     def find_col(candidates):
@@ -799,8 +895,9 @@ def detect_columns(header) -> Tuple[str, Optional[str], Optional[str], Optional[
     active_col = find_col(["active", "is active", "is_active", "enabled"])
     sku_col = find_col(["sku"])
     product_category_col = find_col(["product_category", "product category", "category"])
+    handle_col = find_col(["handle"])
 
-    return name_col, tags_col, thc_col, active_col, sku_col, product_category_col
+    return name_col, tags_col, thc_col, active_col, sku_col, product_category_col, handle_col
 
 
 def extract_lid_thc_records(tags_raw: str, legacy_thc_raw: str = "") -> List[Tuple[Optional[int], str]]:
@@ -863,7 +960,7 @@ def process_csv(
         reader = csv.DictReader(f)
         header = reader.fieldnames or []
 
-        name_col, tags_col, thc_col, active_col, sku_col, product_category_col = detect_columns(header)
+        name_col, tags_col, thc_col, active_col, sku_col, product_category_col, handle_col = detect_columns(header)
 
         if not name_col:
             raise SystemExit(
@@ -887,7 +984,8 @@ def process_csv(
             f"thc_legacy: {thc_col or '(none)'}, "
             f"active: {active_col or '(none; all treated active)'}, "
             f"sku: {sku_col or '(none)'}, "
-            f"product_category: {product_category_col or '(none)'}"
+            f"product_category: {product_category_col or '(none)'}, "
+            f"handle: {handle_col or '(none)'}"
         )
 
         normalized_override = None
@@ -899,12 +997,10 @@ def process_csv(
 
         # For barcode/QR lids:
         # 1. Collect E and Q SKUs by cleaned strain name.
-        # 2. Collect THC label records by cleaned strain name.
-        # 3. Generate 1.25in from E and 1.5in from Q.
-        #
-        # This fixes the Lightspeed export case where quarter rows exist but do
-        # not carry THC tags.
-        code_skus_by_strain: dict[str, dict[str, str]] = {}
+        # 2. Prefer no-dash sellable rows over dashed base rows.
+        # 3. Collect THC label records by cleaned strain name.
+        # 4. Generate 1.25in from E and 1.5in from Q.
+        code_skus_by_strain: dict[str, dict[str, dict[str, object]]] = {}
         code_display_name_by_strain: dict[str, str] = {}
         code_labels: dict[
             tuple[str, Optional[int], str, Optional[str]],
@@ -915,11 +1011,16 @@ def process_csv(
             if is_composite_component_row(row):
                 continue
 
-            if active_col and is_inactive(row.get(active_col, "")):
+            active_raw = row.get(active_col, "") if active_col else ""
+
+            if active_col and is_inactive(active_raw):
                 continue
 
             sku = (row.get(sku_col, "") if sku_col else "").strip()
             product_category = (row.get(product_category_col, "") if product_category_col else "").strip()
+            raw_name = (row.get(name_col) or "").strip()
+            handle = (row.get(handle_col, "") if handle_col else "").strip()
+            tags_raw = row.get(tags_col, "") if tags_col else ""
 
             if exclude_sku_regex and regex_matches(sku, exclude_sku_regex):
                 continue
@@ -927,13 +1028,12 @@ def process_csv(
             if not category_matches_prefix(product_category, category_prefixes):
                 continue
 
-            name = clean_product_name_for_lid((row.get(name_col) or "").strip())
+            name = clean_product_name_for_lid(raw_name)
             if not name:
                 continue
 
             strain_key = slugify(name)
 
-            tags_raw = row.get(tags_col, "") if tags_col else ""
             legacy_thc_raw = row.get(thc_col, "") if thc_col else ""
             thc_records = extract_lid_thc_records(tags_raw, legacy_thc_raw)
 
@@ -943,8 +1043,17 @@ def process_csv(
                 sku_suffix = sku_suffix_from_row(sku, product_category)
 
                 if sku_suffix in {"E", "Q"}:
-                    code_skus_by_strain.setdefault(strain_key, {})
-                    code_skus_by_strain[strain_key].setdefault(sku_suffix, sku)
+                    remember_best_sku(
+                        skus_by_strain=code_skus_by_strain,
+                        strain_key=strain_key,
+                        sku_suffix=sku_suffix,
+                        sku=sku,
+                        raw_name=raw_name,
+                        handle=handle,
+                        tags_raw=tags_raw,
+                        product_category=product_category,
+                        active_raw=active_raw,
+                    )
                     code_display_name_by_strain.setdefault(strain_key, name)
 
                 if thc_records:
@@ -989,13 +1098,15 @@ def process_csv(
                     if expected_suffix is None:
                         continue
 
-                    sku = skus_by_suffix.get(expected_suffix)
-                    if not sku:
+                    sku_record = skus_by_suffix.get(expected_suffix)
+                    if not sku_record:
                         print(
                             f"Skipping {name} {format_size_tag(diameter_inch)}: "
                             f"no {expected_suffix} SKU found"
                         )
                         continue
+
+                    sku = str(sku_record["sku"])
 
                     size_tag = format_size_tag(diameter_inch)
                     prefix = thc_filename_fragment(coa_index, thc)
@@ -1006,6 +1117,11 @@ def process_csv(
                         filename = f"{prefix}-{slugify(name)}-{size_tag}.pdf"
 
                     outfile = strain_dir / filename
+
+                    print(
+                        f"Generating {name} {size_tag} with SKU {sku} "
+                        f"(source row: {sku_record.get('raw_name', '')})"
+                    )
 
                     make_label_pdf(
                         name=name,
