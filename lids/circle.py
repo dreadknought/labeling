@@ -10,35 +10,42 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
 from reportlab.pdfgen import canvas
+from reportlab.graphics import renderPDF
+from reportlab.graphics.barcode import createBarcodeDrawing
+from reportlab.graphics.barcode.qr import QrCodeWidget
+from reportlab.graphics.shapes import Drawing
 from reportlab.lib.units import inch
 from reportlab.lib.colors import CMYKColor
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
-from PyPDF2 import PdfReader, PdfWriter
-from PyPDF2.generic import (
-    NameObject,
-    DictionaryObject,
-    ArrayObject,
-    NumberObject,
-    FloatObject,
-    DecodedStreamObject,
-)
+try:
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import (
+        NameObject,
+        DictionaryObject,
+        ArrayObject,
+        NumberObject,
+        FloatObject,
+        DecodedStreamObject,
+    )
+except ImportError:
+    from PyPDF2 import PdfReader, PdfWriter
+    from PyPDF2.generic import (
+        NameObject,
+        DictionaryObject,
+        ArrayObject,
+        NumberObject,
+        FloatObject,
+        DecodedStreamObject,
+    )
 
-DEFAULT_DIAMETER_INCH = 1.5  # used if no --diameters are provided
+DEFAULT_DIAMETER_INCH = 1.5
 
 
 # ---------------- TAG PARSING ---------------- #
 
 def parse_tags(tags_raw: str) -> Dict[str, str]:
-    """
-    Parse top-level semicolon-separated tags into a dict of key=value pairs.
-
-    Assumptions guaranteed by caller:
-    - top-level tags are separated by semicolons
-    - values do not contain semicolons
-    - values do not contain additional '=' characters
-    """
     out: Dict[str, str] = {}
     if not tags_raw:
         return out
@@ -56,9 +63,6 @@ def parse_tags(tags_raw: str) -> Dict[str, str]:
 
 
 def normalize_thc_value(thc_raw: str) -> str:
-    """
-    Return THC without a trailing '%' because draw_label_on_canvas adds it.
-    """
     if not thc_raw:
         return ""
     s = str(thc_raw).strip()
@@ -69,15 +73,7 @@ def normalize_thc_value(thc_raw: str) -> str:
     return s
 
 
-
-
 def extract_indexed_thc_values(tags_raw: str) -> List[Tuple[int, str]]:
-    """
-    Return all coa_ref_N_thc values, ordered by index.
-
-    The index is included so output filenames can point back to the exact
-    COA/THC pair in the flat tag array.
-    """
     tag_map = parse_tags(tags_raw)
     out: List[Tuple[int, str]] = []
 
@@ -101,10 +97,6 @@ def highest_indexed_thc_value(tags_raw: str) -> str:
 
 
 def find_key_recursive(obj: Any, wanted_key: str) -> Optional[str]:
-    """
-    Recursively search nested dict/list structures for a key, case-insensitive.
-    Returns the first scalar value found as a string.
-    """
     wanted_key = wanted_key.lower()
 
     if isinstance(obj, dict):
@@ -129,13 +121,6 @@ def find_key_recursive(obj: Any, wanted_key: str) -> Optional[str]:
 
 
 def extract_thc_value(tags_raw: str, legacy_thc_raw: str = "") -> str:
-    """
-    THC extraction order for a single-value consumer:
-    1. highest indexed coa_ref_N_thc=...
-    2. top-level thc=...
-    3. embedded json=... payload
-    4. legacy THC column fallback
-    """
     indexed_thc = highest_indexed_thc_value(tags_raw)
     if indexed_thc:
         return indexed_thc
@@ -165,9 +150,6 @@ def extract_thc_value(tags_raw: str, legacy_thc_raw: str = "") -> str:
 
 
 def normalize_weight_grams(weight_raw: str) -> str:
-    """
-    Return weight as a numeric-ish string in grams WITHOUT a trailing unit.
-    """
     if not weight_raw:
         return ""
     s = str(weight_raw).strip().lower().replace(" ", "")
@@ -184,10 +166,6 @@ def is_inactive(active_raw: str) -> bool:
 
 
 def is_composite_component_row(row: dict) -> bool:
-    """
-    In Lightspeed exports, composite component/recipe rows have composite_sku filled.
-    Those are not real sellable items and should not generate labels.
-    """
     return bool((row.get("composite_sku") or "").strip())
 
 
@@ -214,12 +192,6 @@ def slugify(text: str) -> str:
 
 
 def format_inches(x: float) -> str:
-    """
-    Format inches for filenames.
-      1.5 -> "1.5"
-      2.0 -> "2"
-      1.3333 -> "1.333"
-    """
     return f"{x:.3f}".rstrip("0").rstrip(".")
 
 
@@ -227,13 +199,19 @@ def format_size_tag(diameter_inch: float) -> str:
     return f"{format_inches(diameter_inch)}in"
 
 
+def normalized_sku_key(sku: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", sku or "").upper()
+
+
+def lid_sku_suffix_for_diameter(diameter_inch: float) -> Optional[str]:
+    if math.isclose(diameter_inch, 1.25, abs_tol=0.001):
+        return "E"
+    if math.isclose(diameter_inch, 1.5, abs_tol=0.001):
+        return "Q"
+    return None
+
+
 def parse_diameters(raw_values: Optional[List[str]]) -> List[float]:
-    """
-    Accepts:
-      --diameters 1.5 2 3
-    and also comma-separated chunks if needed:
-      --diameters 1.5,2,3
-    """
     if not raw_values:
         return [DEFAULT_DIAMETER_INCH]
 
@@ -265,11 +243,46 @@ def parse_diameters(raw_values: Optional[List[str]]) -> List[float]:
     return deduped
 
 
+def clean_product_name_for_lid(text: str) -> str:
+    """
+    Turn Lightspeed product names into the strain name used on lids.
+
+    Examples:
+      BASE – BASE – Lemon Cherry Sherbert (1/8) -> Lemon Cherry Sherbert
+      Lemon Cherry Sherbert (1/8 oz) -> Lemon Cherry Sherbert
+      Lemon Cherry Sherbert - Quarter (1/4 oz) -> Lemon Cherry Sherbert
+      Lemon Cherry Sherbert - Ounce (1 oz) -> Lemon Cherry Sherbert
+    """
+    if not text:
+        return ""
+
+    s = str(text).strip()
+
+    s = re.sub(
+        r"^\s*BASE\s*[^A-Za-z0-9]+\s*BASE\s*[^A-Za-z0-9]+\s*",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+
+    s = re.sub(r"\s*\([^)]*\)", "", s)
+
+    s = re.sub(
+        r"\s*[-–—]\s*(eighth|quarter|ounce|half ounce|half|1/8|1/4|1 oz|1oz)\s*$",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def strip_parentheses(text: str) -> str:
+    return clean_product_name_for_lid(text)
+
+
 def patch_cutcontour(pdf_path: Path) -> None:
-    """
-    Post-process the ReportLab PDF so strokes use a real
-    Separation spot color named /CutContour instead of plain CMYK.
-    """
     reader = PdfReader(str(pdf_path))
     writer = PdfWriter()
 
@@ -361,6 +374,194 @@ def patch_cutcontour(pdf_path: Path) -> None:
 
 # ---------------- DRAWING ---------------- #
 
+def fit_text_size(text: str, font_name: str, max_width: float, max_size: float, min_size: float) -> float:
+    size = max_size
+    while size > min_size and stringWidth(text, font_name, size) > max_width:
+        size -= 0.25
+    return max(size, min_size)
+
+
+def draw_code128(c, value: str, x: float, y: float, width: float, height: float) -> None:
+    drawing = createBarcodeDrawing(
+        "Code128",
+        value=value,
+        barHeight=height,
+        barWidth=1,
+        humanReadable=False,
+        quiet=False,
+    )
+
+    src_w = float(drawing.width)
+    src_h = float(drawing.height)
+
+    scale_x = width / src_w
+    scale_y = height / src_h
+
+    c.saveState()
+    c.translate(x, y)
+    c.scale(scale_x, scale_y)
+    renderPDF.draw(drawing, c, 0, 0)
+    c.restoreState()
+
+
+def draw_qr(c, value: str, x: float, y: float, size: float) -> None:
+    qr = QrCodeWidget(value)
+    x1, y1, x2, y2 = qr.getBounds()
+    src_size = max(x2 - x1, y2 - y1)
+
+    drawing = Drawing(
+        size,
+        size,
+        transform=[
+            size / src_size,
+            0,
+            0,
+            size / src_size,
+            -x1 * size / src_size,
+            -y1 * size / src_size,
+        ],
+    )
+    drawing.add(qr)
+    renderPDF.draw(drawing, c, x, y)
+
+
+def draw_white_text_band(
+    c,
+    center_x: float,
+    y_center: float,
+    width: float,
+    height: float,
+    text: str,
+    font_name: str,
+    max_size: float,
+    min_size: float,
+) -> None:
+    x = center_x - width / 2.0
+    y = y_center - height / 2.0
+
+    c.saveState()
+    c.setFillColorRGB(1, 1, 1)
+    c.rect(x, y, width, height, stroke=0, fill=1)
+
+    c.setFillColorRGB(0, 0, 0)
+    text_width = width - 0.04 * inch
+    font_size = fit_text_size(text, font_name, text_width, max_size, min_size)
+    c.setFont(font_name, font_size)
+    c.drawCentredString(center_x, y + (height - font_size) / 2.0 + 1.0, text)
+    c.restoreState()
+
+
+def draw_machine_readable_label(
+    c,
+    center_x: float,
+    center_y: float,
+    radius: float,
+    name: str,
+    thc: str,
+    code_style: str,
+    code_value: str,
+    diameter_inch: float,
+) -> None:
+    inner_radius = radius - max(0.012 * inch, diameter_inch * 0.008 * inch)
+
+    band_height = max(0.115 * inch, diameter_inch * 0.09 * inch)
+    name_band_width = inner_radius * 1.65
+    thc_band_width = inner_radius * 1.05
+
+    if code_style == "barcode":
+        # Keep the barcode wide, but make it a bit shorter vertically
+        # so it fits between the name and percentage better.
+        barcode_height = inner_radius * 0.88
+        barcode_width = inner_radius * 1.82
+
+        code_x = center_x - barcode_width / 2.0
+        code_y = center_y - barcode_height / 2.0
+
+        c.saveState()
+        c.setFillColorRGB(1, 1, 1)
+        c.rect(code_x, code_y, barcode_width, barcode_height, stroke=0, fill=1)
+        c.restoreState()
+
+        draw_code128(c, code_value, code_x, code_y, barcode_width, barcode_height)
+
+        # Keep text positions based on the overall circle, not barcode height,
+        # so shortening the barcode actually opens more space between them.
+        name_y_center = center_y + inner_radius * 0.40
+        thc_y_center = center_y - inner_radius * 0.40
+
+        draw_white_text_band(
+            c,
+            center_x=center_x,
+            y_center=name_y_center,
+            width=name_band_width,
+            height=band_height,
+            text=name,
+            font_name="Helvetica-Bold",
+            max_size=8.0,
+            min_size=4.5,
+        )
+
+        draw_white_text_band(
+            c,
+            center_x=center_x,
+            y_center=thc_y_center,
+            width=thc_band_width,
+            height=band_height,
+            text=f"{thc}%",
+            font_name="Helvetica",
+            max_size=8.5,
+            min_size=5.0,
+        )
+
+    elif code_style == "qr":
+        qr_size = inner_radius * 1.42
+        qr_x = center_x - qr_size / 2.0
+        qr_y = center_y - qr_size / 2.0
+
+        quiet_pad = 0.006 * inch
+
+        c.saveState()
+        c.setFillColorRGB(1, 1, 1)
+        c.rect(
+            qr_x - quiet_pad,
+            qr_y - quiet_pad,
+            qr_size + quiet_pad * 2,
+            qr_size + quiet_pad * 2,
+            stroke=0,
+            fill=1,
+        )
+        c.restoreState()
+
+        draw_qr(c, code_value, qr_x, qr_y, qr_size)
+
+        name_y_center = center_y + qr_size * 0.42
+        thc_y_center = center_y - qr_size * 0.42
+
+        draw_white_text_band(
+            c,
+            center_x=center_x,
+            y_center=name_y_center,
+            width=name_band_width,
+            height=band_height,
+            text=name,
+            font_name="Helvetica-Bold",
+            max_size=8.0,
+            min_size=4.5,
+        )
+
+        draw_white_text_band(
+            c,
+            center_x=center_x,
+            y_center=thc_y_center,
+            width=thc_band_width,
+            height=band_height,
+            text=f"{thc}%",
+            font_name="Helvetica",
+            max_size=8.5,
+            min_size=5.0,
+        )
+
+
 def draw_label_on_canvas(
     c,
     origin_x: float,
@@ -370,11 +571,9 @@ def draw_label_on_canvas(
     weight: Optional[str],
     diameter_inch: float,
     bg_image: Optional[Path] = None,
+    code_style: Optional[str] = None,
+    code_value: Optional[str] = None,
 ):
-    """
-    Draw a single circular label at (origin_x, origin_y) on an existing canvas.
-    The label's bounding box is diameter_inch x diameter_inch.
-    """
     label_w = diameter_inch * inch
     label_h = diameter_inch * inch
 
@@ -409,6 +608,20 @@ def draw_label_on_canvas(
 
     c.setFillColorCMYK(0, 0, 0, 1)
 
+    if code_style and code_value:
+        draw_machine_readable_label(
+            c=c,
+            center_x=center_x,
+            center_y=center_y,
+            radius=radius,
+            name=name,
+            thc=thc,
+            code_style=code_style,
+            code_value=code_value,
+            diameter_inch=diameter_inch,
+        )
+        return
+
     text_pad = max(0.06 * inch, 0.05 * diameter_inch * inch)
     r_text = max(0.01 * inch, radius - text_pad)
 
@@ -418,7 +631,7 @@ def draw_label_on_canvas(
             return 0.0
         return 2.0 * math.sqrt((r_text * r_text) - (dy * dy))
 
-    def fit_font_size(
+    def fit_font_size_at_y(
         text: str,
         font_name: str,
         max_size: float,
@@ -463,7 +676,7 @@ def draw_label_on_canvas(
     name_max = 9.5
     name_min = 5.5
 
-    name_size_1 = fit_font_size(name, name_font, name_max, name_min, name_y_single)
+    name_size_1 = fit_font_size_at_y(name, name_font, name_max, name_min, name_y_single)
 
     drew_two_line = False
     name_block_bottom_y = name_y_single
@@ -475,13 +688,13 @@ def draw_label_on_canvas(
             y1 = name_y_top
             y2 = y1 - leading_for(name_max)
 
-            size_a = fit_font_size(a, name_font, name_max, name_min, y1)
-            size_b = fit_font_size(b, name_font, name_max, name_min, y2)
+            size_a = fit_font_size_at_y(a, name_font, name_max, name_min, y1)
+            size_b = fit_font_size_at_y(b, name_font, name_max, name_min, y2)
             name_size_2 = min(size_a, size_b)
 
             y2 = y1 - leading_for(name_size_2)
-            size_a2 = fit_font_size(a, name_font, name_max, name_min, y1)
-            size_b2 = fit_font_size(b, name_font, name_max, name_min, y2)
+            size_a2 = fit_font_size_at_y(a, name_font, name_max, name_min, y1)
+            size_b2 = fit_font_size_at_y(b, name_font, name_max, name_min, y2)
             name_size_2 = min(size_a2, size_b2)
             y2 = y1 - leading_for(name_size_2)
 
@@ -513,7 +726,7 @@ def draw_label_on_canvas(
     else:
         thc_y = max(center_y - 0.70 * r_text, min(thc_y, center_y + 0.10 * r_text))
 
-    thc_size = fit_font_size(thc_text, thc_font, thc_max, thc_min, thc_y)
+    thc_size = fit_font_size_at_y(thc_text, thc_font, thc_max, thc_min, thc_y)
     c.setFont(thc_font, thc_size)
     c.drawCentredString(center_x, thc_y, thc_text)
 
@@ -530,7 +743,7 @@ def draw_label_on_canvas(
 
         weight_y = max(center_y - 0.70 * r_text, min(weight_y, center_y - 0.10 * r_text))
 
-        wt_size = fit_font_size(weight_text, weight_font, wt_max, wt_min, weight_y)
+        wt_size = fit_font_size_at_y(weight_text, weight_font, wt_max, wt_min, weight_y)
         c.setFont(weight_font, wt_size)
         c.drawCentredString(center_x, weight_y, weight_text)
 
@@ -542,6 +755,8 @@ def make_label_pdf(
     outfile: Path,
     diameter_inch: float,
     bg_image: Optional[Path] = None,
+    code_style: Optional[str] = None,
+    code_value: Optional[str] = None,
 ):
     page_w = diameter_inch * inch
     page_h = diameter_inch * inch
@@ -556,6 +771,8 @@ def make_label_pdf(
         weight=weight,
         diameter_inch=diameter_inch,
         bg_image=bg_image,
+        code_style=code_style,
+        code_value=code_value,
     )
 
     c.showPage()
@@ -568,10 +785,6 @@ def make_label_pdf(
 # ---------------- CSV COLUMN DETECTION ---------------- #
 
 def detect_columns(header) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
-    """
-    Weight is intentionally not detected/read from CSV/tags.
-    Net weight is only printed when --weight is provided.
-    """
     lower_map = {h.lower(): h for h in header}
 
     def find_col(candidates):
@@ -590,20 +803,7 @@ def detect_columns(header) -> Tuple[str, Optional[str], Optional[str], Optional[
     return name_col, tags_col, thc_col, active_col, sku_col, product_category_col
 
 
-def strip_parentheses(text: str) -> str:
-    if not text:
-        return ""
-    s = str(text)
-    s = re.sub(r"\s*\([^)]*\)", "", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
 def extract_lid_thc_records(tags_raw: str, legacy_thc_raw: str = "") -> List[Tuple[Optional[int], str]]:
-    """Return every THC value that should get a lid.
-
-    Prefer indexed coa_ref_N_thc values. Fallbacks keep older CSVs usable.
-    """
     indexed = extract_indexed_thc_values(tags_raw)
     if indexed:
         return [(idx, thc) for idx, thc in indexed]
@@ -622,6 +822,32 @@ def thc_filename_fragment(index: Optional[int], thc: str) -> str:
     return f"{index}-thc-{safe_thc}"
 
 
+def sku_suffix_from_row(sku: str, product_category: str) -> Optional[str]:
+    """
+    Prefer category because the uploaded Lightspeed export has reliable categories:
+      Flower / Eighth / ...
+      Flower / Quarter / ...
+
+    Fall back to SKU suffix only when needed.
+    """
+    category = (product_category or "").strip().lower()
+    sku_key = normalized_sku_key(sku)
+
+    if category.startswith("flower / eighth"):
+        return "E"
+
+    if category.startswith("flower / quarter"):
+        return "Q"
+
+    if sku_key.endswith("E"):
+        return "E"
+
+    if sku_key.endswith("Q"):
+        return "Q"
+
+    return None
+
+
 def process_csv(
     csv_path: Path,
     out_dir: Path,
@@ -631,6 +857,7 @@ def process_csv(
     sku_regex: Optional[str],
     exclude_sku_regex: Optional[str],
     category_prefixes: List[str],
+    code_style: Optional[str] = None,
 ):
     with csv_path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -667,8 +894,22 @@ def process_csv(
         if weight_override is not None:
             normalized_override = normalize_weight_grams(weight_override.strip()) or None
 
-        labels: list[tuple[str, Optional[int], str, Optional[str]]] = []
-        seen_labels: set[tuple[str, Optional[int], str, Optional[str]]] = set()
+        labels: list[tuple[str, Optional[int], str, Optional[str], str]] = []
+        seen_labels: set[tuple] = set()
+
+        # For barcode/QR lids:
+        # 1. Collect E and Q SKUs by cleaned strain name.
+        # 2. Collect THC label records by cleaned strain name.
+        # 3. Generate 1.25in from E and 1.5in from Q.
+        #
+        # This fixes the Lightspeed export case where quarter rows exist but do
+        # not carry THC tags.
+        code_skus_by_strain: dict[str, dict[str, str]] = {}
+        code_display_name_by_strain: dict[str, str] = {}
+        code_labels: dict[
+            tuple[str, Optional[int], str, Optional[str]],
+            dict[str, str]
+        ] = {}
 
         for row in reader:
             if is_composite_component_row(row):
@@ -680,39 +921,110 @@ def process_csv(
             sku = (row.get(sku_col, "") if sku_col else "").strip()
             product_category = (row.get(product_category_col, "") if product_category_col else "").strip()
 
-            if sku_regex and not regex_matches(sku, sku_regex):
-                continue
-
             if exclude_sku_regex and regex_matches(sku, exclude_sku_regex):
                 continue
 
             if not category_matches_prefix(product_category, category_prefixes):
                 continue
 
-            name = strip_parentheses((row.get(name_col) or "").strip())
+            name = clean_product_name_for_lid((row.get(name_col) or "").strip())
             if not name:
                 continue
+
+            strain_key = slugify(name)
 
             tags_raw = row.get(tags_col, "") if tags_col else ""
             legacy_thc_raw = row.get(thc_col, "") if thc_col else ""
             thc_records = extract_lid_thc_records(tags_raw, legacy_thc_raw)
 
+            weight: Optional[str] = normalized_override
+
+            if code_style:
+                sku_suffix = sku_suffix_from_row(sku, product_category)
+
+                if sku_suffix in {"E", "Q"}:
+                    code_skus_by_strain.setdefault(strain_key, {})
+                    code_skus_by_strain[strain_key].setdefault(sku_suffix, sku)
+                    code_display_name_by_strain.setdefault(strain_key, name)
+
+                if thc_records:
+                    code_display_name_by_strain.setdefault(strain_key, name)
+
+                    for coa_index, thc in thc_records:
+                        label_key = (strain_key, coa_index, thc, weight)
+                        code_labels.setdefault(label_key, {})
+                        code_labels[label_key]["name"] = name
+
+                continue
+
+            # Old/background lid behavior.
+            if sku_regex and not regex_matches(sku, sku_regex):
+                continue
+
             if not thc_records:
                 continue
 
-            weight: Optional[str] = normalized_override
             for coa_index, thc in thc_records:
-                label = (name, coa_index, thc, weight)
-                if label in seen_labels:
+                label = (name, coa_index, thc, weight, sku)
+                dedupe_key = (name, coa_index, thc, weight)
+                if dedupe_key in seen_labels:
                     continue
-                seen_labels.add(label)
+                seen_labels.add(dedupe_key)
                 labels.append(label)
+
+        if code_style:
+            if not code_labels:
+                print("No valid barcode/QR labels found in CSV.")
+                return
+
+            for (strain_key, coa_index, thc, weight), label_info in code_labels.items():
+                name = label_info.get("name") or code_display_name_by_strain.get(strain_key) or strain_key
+                skus_by_suffix = code_skus_by_strain.get(strain_key, {})
+
+                strain_dir = out_dir / strain_key
+                strain_dir.mkdir(parents=True, exist_ok=True)
+
+                for diameter_inch in diameters_inch:
+                    expected_suffix = lid_sku_suffix_for_diameter(diameter_inch)
+                    if expected_suffix is None:
+                        continue
+
+                    sku = skus_by_suffix.get(expected_suffix)
+                    if not sku:
+                        print(
+                            f"Skipping {name} {format_size_tag(diameter_inch)}: "
+                            f"no {expected_suffix} SKU found"
+                        )
+                        continue
+
+                    size_tag = format_size_tag(diameter_inch)
+                    prefix = thc_filename_fragment(coa_index, thc)
+
+                    if weight:
+                        filename = f"{prefix}-{slugify(name)}-{weight}g-{size_tag}.pdf"
+                    else:
+                        filename = f"{prefix}-{slugify(name)}-{size_tag}.pdf"
+
+                    outfile = strain_dir / filename
+
+                    make_label_pdf(
+                        name=name,
+                        thc=thc,
+                        weight=weight,
+                        outfile=outfile,
+                        diameter_inch=diameter_inch,
+                        bg_image=bg_image,
+                        code_style=code_style,
+                        code_value=sku,
+                    )
+
+            return
 
         if not labels:
             print("No valid labels found in CSV.")
             return
 
-        for (name, coa_index, thc, weight) in labels:
+        for (name, coa_index, thc, weight, sku) in labels:
             strain_slug = slugify(name)
             strain_dir = out_dir / strain_slug
             strain_dir.mkdir(parents=True, exist_ok=True)
@@ -735,6 +1047,8 @@ def process_csv(
                     outfile=outfile,
                     diameter_inch=diameter_inch,
                     bg_image=bg_image,
+                    code_style=code_style,
+                    code_value=sku,
                 )
 
 
@@ -742,18 +1056,17 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Generate circular label PDFs with CutContour from a Lightspeed CSV.\n"
-            "THC is read from tags (thc=...) or from tags json={...}, with legacy THC column as fallback.\n"
+            "THC is read from tags or legacy THC column fallback.\n"
             "Net weight is printed only if --weight is provided.\n"
             "Rows with Active == FALSE/0/NO are skipped.\n"
-            "Composite component rows (composite_sku filled) are skipped.\n"
-            "Outputs are grouped by strain, with one PDF per requested circle size."
+            "Composite component rows are skipped."
         )
     )
     parser.add_argument("csv_file", help="Path to the CSV file with label data.")
     parser.add_argument(
         "--out-dir",
         default="labels_out",
-        help="Directory to write PDFs into (default: labels_out).",
+        help="Directory to write PDFs into.",
     )
     parser.add_argument(
         "--bg-image",
@@ -763,18 +1076,12 @@ def main():
         "--diameters",
         "-d",
         nargs="+",
-        help=(
-            "One or more circle diameters in inches. "
-            'Examples: --diameters 1.5 2 3   or   --diameters 1.5,2,3'
-        ),
+        help='One or more circle diameters in inches. Example: --diameters 1.25 1.5',
     )
     parser.add_argument(
         "--weight",
         "-w",
-        help=(
-            'Optional: print net weight on labels (example: "3.5" or "3.5g"). '
-            "If omitted, no net weight is printed."
-        ),
+        help='Optional: print net weight on labels, example "3.5" or "3.5g".',
     )
     parser.add_argument(
         "--sku-regex",
@@ -789,6 +1096,14 @@ def main():
         action="append",
         default=[],
         help="Only generate lids for rows whose product_category starts with this value. Repeatable.",
+    )
+    parser.add_argument(
+        "--code-style",
+        choices=["barcode", "qr"],
+        help=(
+            "Replace the background with a scannable code. "
+            "For this mode, 1.25-inch lids use E/eighth SKUs and 1.5-inch lids use Q/quarter SKUs."
+        ),
     )
 
     args = parser.parse_args()
@@ -817,6 +1132,7 @@ def main():
         sku_regex=args.sku_regex,
         exclude_sku_regex=args.exclude_sku_regex,
         category_prefixes=args.category_prefix,
+        code_style=args.code_style,
     )
 
 

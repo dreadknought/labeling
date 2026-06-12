@@ -53,6 +53,8 @@ mkdir -p \
   "$OUTPUT_DIR/signboards" \
   "$OUTPUT_DIR/lids" \
   "$OUTPUT_DIR/lids/bbuds" \
+  "$OUTPUT_DIR/lids/barcode" \
+  "$OUTPUT_DIR/lids/qr" \
   "$OUTPUT_DIR/lids/jars" \
   "$OUTPUT_DIR/lids/jars/bbuds" \
   "$OUTPUT_DIR/barcodes" \
@@ -114,6 +116,28 @@ start_job "circle lids bbuds" bash -lc "
     --diameters 1.25 1.5 \
     --bg-image hemp-dahntahn.png \
     --sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)' \
+    '$SKUS'
+"
+
+start_job "circle lids barcode" bash -lc "
+  cd '$SCRIPT_DIR/lids' &&
+  ./circle.py \
+    --out-dir '$OUTPUT_DIR/lids/barcode' \
+    --diameters 1.25 1.5 \
+    --code-style barcode \
+    --category-prefix Flower \
+    --sku-regex 'FL[A-Z]+[EQ]' \
+    '$SKUS'
+"
+
+start_job "circle lids qr" bash -lc "
+  cd '$SCRIPT_DIR/lids' &&
+  ./circle.py \
+    --out-dir '$OUTPUT_DIR/lids/qr' \
+    --diameters 1.25 1.5 \
+    --code-style qr \
+    --category-prefix Flower \
+    --sku-regex 'FL[A-Z]+[EQ]' \
     '$SKUS'
 "
 
