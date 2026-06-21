@@ -2,3 +2,4 @@ env
 skus.csv
 grid_signboard.pdf
 mason-jars
+__pycache__
