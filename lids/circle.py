@@ -160,6 +160,19 @@ def normalize_weight_grams(weight_raw: str) -> str:
     return s.strip()
 
 
+def default_net_weight_for_lid(diameter_inch: float) -> Optional[str]:
+    """Return default flower net weight for standard barcode/QR lid sizes.
+
+    1.25" lids are eighth jars. 1.5" lids are quarter jars.
+    An explicit --weight value still overrides these defaults.
+    """
+    if abs(diameter_inch - 1.25) < 0.01:
+        return "3.5"
+    if abs(diameter_inch - 1.5) < 0.01:
+        return "7"
+    return None
+
+
 def is_inactive(active_raw: str) -> bool:
     s = (active_raw or "").strip().lower()
     return s in {"false", "0", "no", "n"}
@@ -558,6 +571,7 @@ def draw_machine_readable_label(
     radius: float,
     name: str,
     thc: str,
+    weight: Optional[str],
     code_style: str,
     code_value: str,
     diameter_inch: float,
@@ -567,6 +581,8 @@ def draw_machine_readable_label(
     band_height = max(0.115 * inch, diameter_inch * 0.09 * inch)
     name_band_width = inner_radius * 1.65
     thc_band_width = inner_radius * 1.05
+    weight_band_width = inner_radius * 1.35
+    weight_text = f"Net Wt: {weight} g" if (weight or "").strip() else ""
 
     if code_style == "barcode":
         barcode_height = inner_radius * 0.88
@@ -583,7 +599,8 @@ def draw_machine_readable_label(
         draw_code128(c, code_value, code_x, code_y, barcode_width, barcode_height)
 
         name_y_center = center_y + inner_radius * 0.40
-        thc_y_center = center_y - inner_radius * 0.40
+        thc_y_center = center_y - inner_radius * 0.34
+        weight_y_center = center_y - inner_radius * 0.64
 
         draw_white_text_band(
             c,
@@ -608,6 +625,19 @@ def draw_machine_readable_label(
             max_size=8.5,
             min_size=5.0,
         )
+
+        if weight_text:
+            draw_white_text_band(
+                c,
+                center_x=center_x,
+                y_center=weight_y_center,
+                width=weight_band_width,
+                height=band_height,
+                text=weight_text,
+                font_name="Helvetica",
+                max_size=7.2,
+                min_size=4.5,
+            )
 
     elif code_style == "qr":
         qr_size = inner_radius * 1.42
@@ -631,7 +661,8 @@ def draw_machine_readable_label(
         draw_qr(c, code_value, qr_x, qr_y, qr_size)
 
         name_y_center = center_y + qr_size * 0.42
-        thc_y_center = center_y - qr_size * 0.42
+        thc_y_center = center_y - qr_size * 0.36
+        weight_y_center = center_y - qr_size * 0.54
 
         draw_white_text_band(
             c,
@@ -656,6 +687,19 @@ def draw_machine_readable_label(
             max_size=8.5,
             min_size=5.0,
         )
+
+        if weight_text:
+            draw_white_text_band(
+                c,
+                center_x=center_x,
+                y_center=weight_y_center,
+                width=weight_band_width,
+                height=band_height,
+                text=weight_text,
+                font_name="Helvetica",
+                max_size=7.2,
+                min_size=4.5,
+            )
 
 
 def draw_label_on_canvas(
@@ -712,6 +756,7 @@ def draw_label_on_canvas(
             radius=radius,
             name=name,
             thc=thc,
+            weight=weight,
             code_style=code_style,
             code_value=code_value,
             diameter_inch=diameter_inch,
@@ -1107,26 +1152,28 @@ def process_csv(
                         continue
 
                     sku = str(sku_record["sku"])
+                    effective_weight = weight or default_net_weight_for_lid(diameter_inch)
 
                     size_tag = format_size_tag(diameter_inch)
                     prefix = thc_filename_fragment(coa_index, thc)
 
-                    if weight:
-                        filename = f"{prefix}-{slugify(name)}-{weight}g-{size_tag}.pdf"
+                    if effective_weight:
+                        filename = f"{prefix}-{slugify(name)}-{effective_weight}g-{size_tag}.pdf"
                     else:
                         filename = f"{prefix}-{slugify(name)}-{size_tag}.pdf"
 
                     outfile = strain_dir / filename
 
+                    weight_note = f", Net Wt {effective_weight} g" if effective_weight else ""
                     print(
-                        f"Generating {name} {size_tag} with SKU {sku} "
+                        f"Generating {name} {size_tag} with SKU {sku}{weight_note} "
                         f"(source row: {sku_record.get('raw_name', '')})"
                     )
 
                     make_label_pdf(
                         name=name,
                         thc=thc,
-                        weight=weight,
+                        weight=effective_weight,
                         outfile=outfile,
                         diameter_inch=diameter_inch,
                         bg_image=bg_image,
@@ -1173,7 +1220,7 @@ def main():
         description=(
             "Generate circular label PDFs with CutContour from a Lightspeed CSV.\n"
             "THC is read from tags or legacy THC column fallback.\n"
-            "Net weight is printed only if --weight is provided.\n"
+            "Net weight is printed from --weight. For barcode/QR lids, 1.25in defaults to 3.5 g and 1.5in defaults to 7 g.\n"
             "Rows with Active == FALSE/0/NO are skipped.\n"
             "Composite component rows are skipped."
         )
