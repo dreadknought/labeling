@@ -113,9 +113,10 @@ start_job "circle lids bbuds" bash -lc "
   cd '$SCRIPT_DIR/lids' &&
   ./circle.py \
     --out-dir '$OUTPUT_DIR/lids/bbuds' \
-    --diameters 1.25 1.5 \
-    --bg-image hemp-dahntahn.png \
-    --sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)' \
+    --diameters 1.5 \
+    --weight 14 \
+    --code-style barcode \
+    --sku-regex 'BB-[A-Z]+-HO' \
     '$SKUS'
 "
 
@@ -126,7 +127,6 @@ start_job "circle lids barcode" bash -lc "
     --diameters 1.25 1.5 \
     --code-style barcode \
     --category-prefix Flower \
-    --sku-regex 'FL[A-Z]+[EQ]' \
     '$SKUS'
 "
 
