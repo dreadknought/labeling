@@ -41,6 +41,7 @@ except ImportError:
     )
 
 DEFAULT_DIAMETER_INCH = 1.5
+DEFAULT_STRAIN_NAME_FONT = "Helvetica"
 
 
 # ---------------- TAG PARSING ---------------- #
@@ -575,6 +576,7 @@ def draw_machine_readable_label(
     code_style: str,
     code_value: str,
     diameter_inch: float,
+    name_font: str = DEFAULT_STRAIN_NAME_FONT,
 ) -> None:
     inner_radius = radius - max(0.012 * inch, diameter_inch * 0.008 * inch)
 
@@ -609,8 +611,8 @@ def draw_machine_readable_label(
             width=name_band_width,
             height=band_height,
             text=name,
-            font_name="Helvetica-Bold",
-            max_size=8.0,
+            font_name=name_font,
+            max_size=8.5,
             min_size=4.5,
         )
 
@@ -671,8 +673,8 @@ def draw_machine_readable_label(
             width=name_band_width,
             height=band_height,
             text=name,
-            font_name="Helvetica-Bold",
-            max_size=8.0,
+            font_name=name_font,
+            max_size=8.5,
             min_size=4.5,
         )
 
@@ -713,6 +715,7 @@ def draw_label_on_canvas(
     bg_image: Optional[Path] = None,
     code_style: Optional[str] = None,
     code_value: Optional[str] = None,
+    name_font: str = DEFAULT_STRAIN_NAME_FONT,
 ):
     label_w = diameter_inch * inch
     label_h = diameter_inch * inch
@@ -760,6 +763,7 @@ def draw_label_on_canvas(
             code_style=code_style,
             code_value=code_value,
             diameter_inch=diameter_inch,
+            name_font=name_font,
         )
         return
 
@@ -813,8 +817,8 @@ def draw_label_on_canvas(
     thc_y_default = (center_y - 0.02 * r_text) if weight_present else (center_y - 0.22 * r_text)
     weight_y_default = center_y - 0.32 * r_text
 
-    name_font = "Helvetica-Bold"
-    name_max = 9.5
+    name_font = name_font or DEFAULT_STRAIN_NAME_FONT
+    name_max = 10.0
     name_min = 5.5
 
     name_size_1 = fit_font_size_at_y(name, name_font, name_max, name_min, name_y_single)
@@ -898,6 +902,7 @@ def make_label_pdf(
     bg_image: Optional[Path] = None,
     code_style: Optional[str] = None,
     code_value: Optional[str] = None,
+    name_font: str = DEFAULT_STRAIN_NAME_FONT,
 ):
     page_w = diameter_inch * inch
     page_h = diameter_inch * inch
@@ -914,6 +919,7 @@ def make_label_pdf(
         bg_image=bg_image,
         code_style=code_style,
         code_value=code_value,
+        name_font=name_font,
     )
 
     c.showPage()
@@ -1000,6 +1006,7 @@ def process_csv(
     exclude_sku_regex: Optional[str],
     category_prefixes: List[str],
     code_style: Optional[str] = None,
+    name_font: str = DEFAULT_STRAIN_NAME_FONT,
 ):
     with csv_path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -1040,7 +1047,7 @@ def process_csv(
         labels: list[tuple[str, Optional[int], str, Optional[str], str]] = []
         seen_labels: set[tuple] = set()
 
-        # For barcode/QR lids:
+        # For normal barcode/QR flower lids:
         # 1. Collect E and Q SKUs by cleaned strain name.
         # 2. Prefer no-dash sellable rows over dashed base rows.
         # 3. Collect THC label records by cleaned strain name.
@@ -1051,6 +1058,9 @@ def process_csv(
             tuple[str, Optional[int], str, Optional[str]],
             dict[str, str]
         ] = {}
+
+        direct_code_labels: list[tuple[str, Optional[int], str, Optional[str], str]] = []
+        seen_direct_code_labels: set[tuple] = set()
 
         for row in reader:
             if is_composite_component_row(row):
@@ -1085,6 +1095,33 @@ def process_csv(
             weight: Optional[str] = normalized_override
 
             if code_style:
+                # Important:
+                # If --code-style is combined with --sku-regex, treat the regex
+                # as a hard filter and use the matching row's SKU directly as the
+                # barcode/QR value.
+                #
+                # This is what BBuds needs:
+                #   --code-style barcode
+                #   --sku-regex 'BB-[A-Z]+-(HO|OZ|QP|LB)'
+                #
+                # Without this branch, barcode mode falls back to regular flower
+                # E/Q mapping and outputs normal strains instead of BBuds.
+                if sku_regex:
+                    if not regex_matches(sku, sku_regex):
+                        continue
+
+                    if not thc_records:
+                        continue
+
+                    for coa_index, thc in thc_records:
+                        dedupe_key = (name, coa_index, thc, weight, sku)
+                        if dedupe_key in seen_direct_code_labels:
+                            continue
+                        seen_direct_code_labels.add(dedupe_key)
+                        direct_code_labels.append((name, coa_index, thc, weight, sku))
+
+                    continue
+
                 sku_suffix = sku_suffix_from_row(sku, product_category)
 
                 if sku_suffix in {"E", "Q"}:
@@ -1127,10 +1164,46 @@ def process_csv(
                 labels.append(label)
 
         if code_style:
-            if not code_labels:
-                print("No valid barcode/QR labels found in CSV.")
-                return
+            generated_any = False
 
+            # Direct barcode/QR mode for --sku-regex rows, such as BBuds.
+            for name, coa_index, thc, weight, sku in direct_code_labels:
+                strain_slug = slugify(name)
+                strain_dir = out_dir / strain_slug
+                strain_dir.mkdir(parents=True, exist_ok=True)
+
+                for diameter_inch in diameters_inch:
+                    size_tag = format_size_tag(diameter_inch)
+                    prefix = thc_filename_fragment(coa_index, thc)
+                    effective_weight = weight or default_net_weight_for_lid(diameter_inch)
+                    sku_fragment = slugify(sku)
+
+                    if effective_weight:
+                        filename = f"{prefix}-{slugify(name)}-{sku_fragment}-{effective_weight}g-{size_tag}.pdf"
+                    else:
+                        filename = f"{prefix}-{slugify(name)}-{sku_fragment}-{size_tag}.pdf"
+
+                    outfile = strain_dir / filename
+
+                    weight_note = f", Net Wt {effective_weight} g" if effective_weight else ""
+                    print(
+                        f"Generating {name} {size_tag} with direct SKU {sku}{weight_note}"
+                    )
+
+                    make_label_pdf(
+                        name=name,
+                        thc=thc,
+                        weight=effective_weight,
+                        outfile=outfile,
+                        diameter_inch=diameter_inch,
+                        bg_image=bg_image,
+                        code_style=code_style,
+                        code_value=sku,
+                        name_font=name_font,
+                    )
+                    generated_any = True
+
+            # Original flower barcode/QR mode.
             for (strain_key, coa_index, thc, weight), label_info in code_labels.items():
                 name = label_info.get("name") or code_display_name_by_strain.get(strain_key) or strain_key
                 skus_by_suffix = code_skus_by_strain.get(strain_key, {})
@@ -1179,7 +1252,12 @@ def process_csv(
                         bg_image=bg_image,
                         code_style=code_style,
                         code_value=sku,
+                        name_font=name_font,
                     )
+                    generated_any = True
+
+            if not generated_any:
+                print("No valid barcode/QR labels found in CSV.")
 
             return
 
@@ -1212,6 +1290,7 @@ def process_csv(
                     bg_image=bg_image,
                     code_style=code_style,
                     code_value=sku,
+                    name_font=name_font,
                 )
 
 
@@ -1265,7 +1344,17 @@ def main():
         choices=["barcode", "qr"],
         help=(
             "Replace the background with a scannable code. "
-            "For this mode, 1.25-inch lids use E/eighth SKUs and 1.5-inch lids use Q/quarter SKUs."
+            "Normal Flower mode maps 1.25-inch lids to E/eighth SKUs and 1.5-inch lids to Q/quarter SKUs. "
+            "When --sku-regex is supplied, matching rows are generated directly using their own SKU."
+        ),
+    )
+    parser.add_argument(
+        "--name-font",
+        default=DEFAULT_STRAIN_NAME_FONT,
+        help=(
+            "Font to use for strain names only. "
+            "THC percentage and net weight stay Helvetica. "
+            "Default: Helvetica."
         ),
     )
 
@@ -1296,6 +1385,7 @@ def main():
         exclude_sku_regex=args.exclude_sku_regex,
         category_prefixes=args.category_prefix,
         code_style=args.code_style,
+        name_font=args.name_font,
     )
 
 
