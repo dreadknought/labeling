@@ -616,17 +616,18 @@ def draw_machine_readable_label(
             min_size=4.5,
         )
 
-        draw_white_text_band(
-            c,
-            center_x=center_x,
-            y_center=thc_y_center,
-            width=thc_band_width,
-            height=band_height,
-            text=f"{thc}%",
-            font_name="Helvetica",
-            max_size=8.5,
-            min_size=5.0,
-        )
+        if (thc or "").strip():
+            draw_white_text_band(
+                c,
+                center_x=center_x,
+                y_center=thc_y_center,
+                width=thc_band_width,
+                height=band_height,
+                text=f"{thc}%",
+                font_name="Helvetica",
+                max_size=8.5,
+                min_size=5.0,
+            )
 
         if weight_text:
             draw_white_text_band(
@@ -678,17 +679,18 @@ def draw_machine_readable_label(
             min_size=4.5,
         )
 
-        draw_white_text_band(
-            c,
-            center_x=center_x,
-            y_center=thc_y_center,
-            width=thc_band_width,
-            height=band_height,
-            text=f"{thc}%",
-            font_name="Helvetica",
-            max_size=8.5,
-            min_size=5.0,
-        )
+        if (thc or "").strip():
+            draw_white_text_band(
+                c,
+                center_x=center_x,
+                y_center=thc_y_center,
+                width=thc_band_width,
+                height=band_height,
+                text=f"{thc}%",
+                font_name="Helvetica",
+                max_size=8.5,
+                min_size=5.0,
+            )
 
         if weight_text:
             draw_white_text_band(
@@ -964,7 +966,10 @@ def extract_lid_thc_records(tags_raw: str, legacy_thc_raw: str = "") -> List[Tup
 
 
 def thc_filename_fragment(index: Optional[int], thc: str) -> str:
-    safe_thc = slugify(normalize_thc_value(thc).replace(".", "-"))
+    normalized = normalize_thc_value(thc)
+    if not normalized:
+        return "no-thc"
+    safe_thc = slugify(normalized.replace(".", "-"))
     if index is None:
         return f"legacy-thc-{safe_thc}"
     return f"{index}-thc-{safe_thc}"
@@ -1111,7 +1116,7 @@ def process_csv(
                         continue
 
                     if not thc_records:
-                        continue
+                        thc_records = [(None, "")]
 
                     for coa_index, thc in thc_records:
                         dedupe_key = (name, coa_index, thc, weight, sku)

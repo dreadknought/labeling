@@ -57,6 +57,7 @@ mkdir -p \
   "$OUTPUT_DIR/lids/qr" \
   "$OUTPUT_DIR/lids/jars" \
   "$OUTPUT_DIR/lids/jars/bbuds" \
+  "$OUTPUT_DIR/lids/prerolls/barcode" \
   "$OUTPUT_DIR/barcodes" \
   "$OUTPUT_DIR/barcodes/bbuds" \
   "$OUTPUT_DIR/barcodes/edibles" \
@@ -127,6 +128,43 @@ start_job "circle lids barcode" bash -lc "
     --diameters 1.25 1.5 \
     --code-style barcode \
     --category-prefix Flower \
+    '$SKUS'
+"
+
+
+start_job "circle lids Yinzer 0.5g preroll barcode" bash -lc "
+  cd '$SCRIPT_DIR/lids' &&
+  ./circle.py \
+    --out-dir '$OUTPUT_DIR/lids/prerolls/barcode' \
+    --diameters 1.25 \
+    --code-style barcode \
+    --category-prefix Prerolls \
+    --sku-regex '10484' \
+    --weight 0.5 \
+    '$SKUS'
+"
+
+start_job "circle lids Yinzer 5g prerolls barcode" bash -lc "
+  cd '$SCRIPT_DIR/lids' &&
+  ./circle.py \
+    --out-dir '$OUTPUT_DIR/lids/prerolls/barcode' \
+    --diameters 1.25 \
+    --code-style barcode \
+    --category-prefix Prerolls \
+    --sku-regex '10487' \
+    --weight 5 \
+    '$SKUS'
+"
+
+start_job "circle lids Yinzer 14g prerolls barcode" bash -lc "
+  cd '$SCRIPT_DIR/lids' &&
+  ./circle.py \
+    --out-dir '$OUTPUT_DIR/lids/prerolls/barcode' \
+    --diameters 1.5 \
+    --code-style barcode \
+    --category-prefix Prerolls \
+    --sku-regex '10486' \
+    --weight 14 \
     '$SKUS'
 "
 
